@@ -1,0 +1,13 @@
+{
+  "website": "dafabet",
+  "url": "https://sports.indiadafa.com/en/sports/215-CRIC",
+  "selectors": {
+    "event_container": "div[data-slot='event-card']",
+    "team_selector": "[data-testid^='scoresbar-opponent-']",
+    "score_selector": ".text-right.text-xs",
+    "market_group": "div[data-testid^='cricket-market-']",
+    "market_title": ".label-small.text-th-primary-text",
+    "outcome_label": "[data-testid='outcome-label']",
+    "outcome_price": "[data-testid='outcome-price']"
+  }
+}
