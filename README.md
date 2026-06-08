@@ -1,4 +1,272 @@
-# provide best betting api data
-* live score , odds , all sports and more 
-* using "e:/PYTHON/bet_api/.venv/Scripts/python.exe" -m pip install
-* use .\venv\Scripts\pip.exe install playwright for powershell# BET-API
+# BET-API - AI-Assisted Universal Sportsbook Scraper
+
+Scrape any sportsbook website by providing only a URL. Uses Playwright for browser automation, Ollama AI for automatic selector discovery, and a self-healing scraper that re-generates selectors when the site changes.
+
+## Architecture
+
+```
+URL Input
+    ↓
+Playwright (fetches rendered HTML)
+    ↓
+DOM Compressor (reduces tokens by 90%+)
+    ↓
+Ollama AI (qwen3:8b / llama3 / deepseek-r1)
+    ↓
+Selector Validator (confidence scoring)
+    ↓
+selector.json
+    ↓
+Generic Scraper (reads selectors, no hardcoding)
+```
+
+## Project Structure
+
+```
+E:\PYTHON\bet_api\
+├── main.py                        # Discovery orchestrator (URL → selector.json)
+├── trial/
+│   ├── crick.py                   # Main scraper: reads selector.json, live-updates JSON
+│   ├── fix1.py                    # Intermediate fix (Playwright-only, no markets)
+│   ├── test.py                    # Legacy test scraper for FOOT
+│   ├── dom_compressor.py          # DOM compression module for Ollama prompts
+│   ├── ollama_client.py           # Ollama selector generator with multi-pass strategy
+│   ├── selector_validator.py      # Validates AI-generated selectors against real DOM
+│   ├── __init__.py                # Makes 'trial' a Python package
+│   └── selector.json              # Auto-generated (or manual) CSS selectors
+└── scrapper.py                    # Empty placeholder
+```
+
+## File-by-File Explanation
+
+### `main.py` — Discovery Orchestrator
+
+Turns ANY sportsbook URL into a working `selector.json`.
+
+**Workflow:**
+1. Opens URL with Playwright, blocks images/fonts/stylesheets for speed
+2. Extracts full HTML → compresses it with `dom_compressor.compress_dom()`
+3. Sends compressed DOM to Ollama via multi-pass prompts:
+   - **Pass 1 (containers):** Find event/match card selectors
+   - **Pass 2 (teams):** Find team name selectors
+   - **Pass 3 (scores):** Find score selectors
+   - **Pass 4 (markets):** Find market group + outcome label/price selectors
+4. Validates every selector against actual DOM via `score_selectors()`
+5. If confidence ≥ 0.4, saves `selector.json`. If too low, retries with refined prompts.
+6. Max 3 attempts before failing.
+
+**Usage:**
+```bash
+python main.py "https://sports.example.com/live"
+```
+
+### `trial/dom_compressor.py` — DOM Compressor
+
+Turns full HTML into a compact JSON format for Ollama.
+
+**What it extracts per tag:**
+- `tag`: HTML tag name
+- `attrs`: `class`, `data-testid`, `data-slot` only (drops everything else)
+- `text`: First 50 chars of visible text
+
+**Why:** Reduces tokens by 90%+ so Ollama can process 1500+ tags in one shot.
+
+**Example output:**
+```json
+[
+  {"tag": "div", "attrs": {"data-testid": "event-123"}, "text": "West Indies vs Sri Lanka"},
+  {"tag": "div", "attrs": {"data-testid": "scoresbar-opponent-West Indies"}, "text": "West Indies"},
+  ...
+]
+```
+
+### `trial/ollama_client.py` — Ollama AI Selector Generator
+
+Connects to local Ollama server and generates CSS selectors from compressed DOM.
+
+**Key functions:**
+- `discover_selectors(dom_json, model, passes)` — Runs 4 AI passes (containers → teams → scores → markets)
+- `assemble_selectors(partial_selectors, model)` — Refines weak selectors into a complete config
+- `_chat(model, user_content)` — Calls `ollama.chat()` with `num_predict=400`, strips code fences
+
+**Recommended models:**
+- `qwen3:8b` — best speed/accuracy balance (default)
+- `deepseek-r1:8b` — better reasoning
+- `llama3.1:8b` — good general fallback
+
+### `trial/selector_validator.py` — Validation Layer
+
+**Never trusts AI directly.** Tests every selector against the actual page DOM.
+
+```python
+score_selectors(soup, selectors) → {"confidence": 0.92, "hits": {...}}
+```
+
+**Scoring:**
+- `event_container`: +10 if ≥1 match
+- `team_selector`: +10 if ≥2 matches
+- `score_selector`: +10 if ≥1 match
+- `market_group`, `market_title`, `outcome_button`, `outcome_label`, `outcome_price`: +0 if 0 matches (optional markets)
+
+**Threshold:** `≥0.4` confidence required to accept selectors.
+
+### `trial/crick.py` — Main Scraper (Generic + Self-Healing)
+
+OOP scraper that consumes `selector.json`. No hardcoded selectors.
+
+**Core methods:**
+- `start()` — Launches Playwright, navigates to URL, blocks resources
+- `scrape()` — Reloads page, parses HTML with BeautifulSoup, extracts data using selectors from config
+- `parse_teams_and_scores(card)` — Pairs each team with its score using `team_selector` and `score_selector`
+- `parse_markets(card)` — Extracts market groups, titles, outcomes, labels, and prices
+- `self_heal(soup)` — Triggered when `event_count == 0`. Re-runs Ollama discovery, updates `selector.json`, and retries
+- `run(interval=0.2)` — Main loop: prints JSON only when data changes (hash-based dedup)
+
+**Self-healing flow:**
+1. Scrape returns 0 events
+2. Capture current DOM
+3. Call `discover_selectors()` (Ollama)
+4. Validate new selectors
+5. Save to `selector.json`
+6. Continue scraping with new selectors
+
+### `trial/selector.json` — Selector Configuration
+
+Auto-generated by `main.py` or written manually.
+
+**Schema:**
+```json
+{
+  "website": "auto-detected or manual name",
+  "url": "https://sports.example.com/...",
+  "selectors": {
+    "event_container": "CSS selector for each match card",
+    "team_selector": "CSS selector for team name elements",
+    "score_selector": "CSS selector for score elements",
+    "market_group": "CSS selector for market blocks",
+    "market_title": "CSS selector for market name",
+    "outcome_button": "CSS selector for each odds row",
+    "outcome_label": "CSS selector for bet label (Home/Away/OVER)",
+    "outcome_price": "CSS selector for odds number"
+  }
+}
+```
+
+### `trial/test.py` — Legacy Scraper (Sports/Foot)
+
+Hardcoded scraper for `https://sports.indiadafa.com/en/live/sport/240-FOOT`. Includes markets, times, and market counts. Kept for reference/testing.
+
+### `trial/fix1.py` — Intermediate Fix
+
+Earlier iteration of the scraper using Playwright `Locator` (not BS4). Had issues with complex CSS selectors (`:first-of-type`, `[attr^=...]`). Superseded by `crick.py`.
+
+### `scrapper.py` — Empty Placeholder
+
+Reserved for future use.
+
+## Data Flow
+
+```
+User runs: python main.py "<URL>"
+    ↓
+Playwright opens browser → fetches page
+    ↓
+DOM Compressor → 1500-tag JSON
+    ↓
+Ollama (4 passes) → candidate selectors
+    ↓
+Selector Validator → confidence score
+    ↓
+selector.json saved
+
+User runs: python trial/crick.py
+    ↓
+LiveScraper loads selector.json
+    ↓
+Playwright loads URL
+    ↓
+Every 200ms:
+  reload() → get HTML → BS4 parse
+  ↓
+  For each event card:
+    - find teams via team_selector
+    - find scores via score_selector
+    - pair them by index
+    - find markets + outcomes
+    ↓
+  Output JSON to console (only if changed)
+    ↓
+  If 0 events:
+    Trigger self-heal → Ollama → new selectors → selector.json overwrite
+```
+
+## Sample Output
+
+```json
+{
+  "website": "dafabet",
+  "url": "https://sports.indiadafa.com/en/sports/215-CRIC",
+  "timestamp": "2025-01-15 14:30:25",
+  "event_count": 13,
+  "events": [
+    {
+      "teams": [
+        {"team": "West Indies", "score": "421/10"},
+        {"team": "Sri Lanka", "score": "17/0"}
+      ],
+      "markets": [
+        {
+          "market_name": "Match Odds",
+          "outcomes": [
+            {"label": "West Indies", "price": "1.85"},
+            {"label": "Sri Lanka", "price": "2.10"}
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Prerequisites
+
+```bash
+pip install playwright beautifulsoup4 ollama
+playwright install chromium
+ollama pull qwen3:8b
+ollama serve    # or run Ollama desktop app
+```
+
+## Quick Start
+
+1. **Discover selectors for any URL:**
+   ```bash
+   python main.py "https://sports.example.com/en/sports/215-CRIC"
+   ```
+
+2. **Scrape with generated selectors:**
+   ```bash
+   python trial/crick.py
+   ```
+
+3. **The scraper outputs live-updating JSON every 200ms.** Only prints when data changes (hash-based deduplication).
+
+4. **Self-healing:** If the site changes and scraping fails, just re-run step 1 to regenerate `selector.json`.
+
+## Why This Design?
+
+| Problem | Solution |
+|---------|----------|
+| Manual selector writing is slow and breaks when sites change | Ollama auto-discovers selectors from DOM |
+| Full HTML is too large for AI prompts | `dom_compressor.py` cuts tokens by 90%+ |
+| AI can hallucinate selectors | `selector_validator.py` scores against real DOM, requires ≥40% confidence |
+| Sites change classes/IDs | `self_heal()` auto-re-discovers selectors when scraping fails |
+| One scraper for all sportsbooks | `selector.json` drives all extraction logic |
+| Need live data | 200ms polling with hash-based output (only prints changes) |
+
+## Notes
+
+- `event_count == 0` triggers self-healing only once per scrape cycle (prevents loops)
+- `outcome_button` is optional if `outcome_label`/`outcome_price` find their targets directly
+- Market title is hardcoded fallback `.label-small.text-th-primary-text` in `crick.py` for Dafabet
+- Ollama discovery requires `ollama serve` running locally on `http://localhost:11434`
